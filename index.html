@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anime Mirror</title>
+
+  <style>
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #111815;
+      color: white;
+      font-family: Arial, sans-serif;
+      text-align: center;
+    }
+
+    .previews {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 24px;
+      margin: 24px 0;
+    }
+
+    .preview {
+      width: 100%;
+      max-width: 540px;
+    }
+
+    video,
+    canvas {
+      display: block;
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      background: #253028;
+      border-radius: 16px;
+      object-fit: contain;
+      transform: scaleX(-1);
+    }
+
+    button {
+      padding: 12px 20px;
+      margin: 4px;
+      background: #d8fb8c;
+      color: #172014;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    #status {
+      color: #c5d2c6;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Anime Mirror</h1>
+  <p>Live face tracking with soft anime shading.</p>
+
+  <div class="previews">
+    <section class="preview">
+      <h2>Original</h2>
+      <video id="camera" autoplay playsinline muted></video>
+    </section>
+
+    <section class="preview">
+      <h2>Live filter</h2>
+      <canvas id="processed"></canvas>
+    </section>
+  </div>
+
+  <button id="start">Enable camera</button>
+  <button id="transform" disabled aria-pressed="false">
+    Transform
+  </button>
+  <button id="stop" disabled>Stop camera</button>
+
+  <p id="status" role="status">Your camera is off.</p>
+
+  <script>
+    const video = document.querySelector("#camera");
+    const processed = document.querySelector("#processed");
+    const processedContext = processed.getContext("2d");
+
+    const startButton = document.querySelector("#start");
+    const transformButton = document.querySelector("#transform");
+    const stopButton = document.querySelector("#stop");
+    const statusText = document.querySelector("#status");
+
+    // Hidden canvas used to capture camera frames.
+    const capture = document.createElement("canvas");
+    const captureContext = capture.getContext("2d");
+
+    let stream = null;
+    let socket = null;
+    let animeEnabled = false;
+
+    function stopCamera() {
+      const oldSocket = socket;
+      socket = null;
+      oldSocket?.close();
+
+      stream?.getTracks().forEach(track => track.stop());
+      stream = null;
+      video.srcObject = null;
+
+      processedContext.clearRect(
+        0, 0, processed.width, processed.height
+      );
+
+      animeEnabled = false;
+      startButton.disabled = false;
+      stopButton.disabled = true;
+      transformButton.disabled = true;
+      transformButton.textContent = "Transform";
+      transformButton.setAttribute("aria-pressed", "false");
+
+      statusText.textContent = "Your camera is off.";
+    }
+
+    function sendFrame(connection) {
+      if (
+        !stream ||
+        socket !== connection ||
+        connection.readyState !== WebSocket.OPEN
+      ) {
+        return;
+      }
+
+      captureContext.drawImage(
+        video, 0, 0, capture.width, capture.height
+      );
+
+      capture.toBlob(blob => {
+        if (
+          !blob ||
+          !stream ||
+          socket !== connection ||
+          connection.readyState !== WebSocket.OPEN
+        ) {
+          return;
+        }
+
+        // First byte: 0 for natural, 1 for anime.
+        const mode = new Uint8Array([animeEnabled ? 1 : 0]);
+
+        // Attach the JPEG after the mode byte.
+        connection.send(new Blob([mode, blob]));
+      }, "image/jpeg", 0.8);
+    }
+
+    function connectToPython() {
+      const protocol = location.protocol === "https:" ? "wss" : "ws";
+
+      const connection = new WebSocket(
+        `${protocol}://${location.host}/ws`
+      );
+
+      socket = connection;
+      connection.binaryType = "blob";
+
+      connection.onopen = () => {
+        if (socket !== connection) return;
+
+        transformButton.disabled = false;
+        statusText.textContent = "Connected. Click Transform!";
+        sendFrame(connection);
+      };
+
+      connection.onmessage = async event => {
+        if (socket !== connection) return;
+
+        try {
+          const image = await createImageBitmap(event.data);
+
+          if (socket === connection && stream) {
+            processedContext.drawImage(
+              image, 0, 0, processed.width, processed.height
+            );
+          }
+
+          image.close();
+
+          // Wait for each result before sending another frame.
+          setTimeout(() => sendFrame(connection), 50);
+        } catch (error) {
+          if (socket !== connection) return;
+
+          socket = null;
+          connection.close();
+          transformButton.disabled = true;
+
+          statusText.textContent =
+            "Could not display the result. Stop and restart the camera.";
+
+          console.error(error);
+        }
+      };
+
+      connection.onclose = () => {
+        if (socket !== connection) return;
+
+        socket = null;
+        transformButton.disabled = true;
+        statusText.textContent =
+          "Python disconnected. Check the server, then restart the camera.";
+      };
+
+      connection.onerror = () => {
+        if (socket !== connection) return;
+
+        transformButton.disabled = true;
+        statusText.textContent =
+          "Connection error. Check that Python is running.";
+      };
+    }
+
+    async function startCamera() {
+      startButton.disabled = true;
+      statusText.textContent = "Waiting for camera permission…";
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: "user",
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+          },
+          audio: false
+        });
+
+        video.srcObject = stream;
+        await video.play();
+
+        capture.width = Math.min(video.videoWidth, 640);
+        capture.height = Math.round(
+          capture.width * video.videoHeight / video.videoWidth
+        );
+
+        processed.width = capture.width;
+        processed.height = capture.height;
+
+        stopButton.disabled = false;
+
+        stream.getVideoTracks()[0].addEventListener(
+          "ended", stopCamera
+        );
+
+        statusText.textContent = "Connecting to Python…";
+        connectToPython();
+      } catch (error) {
+        stopCamera();
+        statusText.textContent = `Camera error: ${error.message}`;
+      }
+    }
+
+    transformButton.addEventListener("click", () => {
+      animeEnabled = !animeEnabled;
+
+      transformButton.textContent = animeEnabled
+        ? "Back to natural"
+        : "Transform";
+
+      transformButton.setAttribute(
+        "aria-pressed", String(animeEnabled)
+      );
+
+      statusText.textContent = animeEnabled
+        ? "Anime shading enabled. Keep your face in view."
+        : "Natural view.";
+    });
+
+    startButton.addEventListener("click", startCamera);
+    stopButton.addEventListener("click", stopCamera);
+    window.addEventListener("pagehide", stopCamera);
+  </script>
+</body>
+</html>

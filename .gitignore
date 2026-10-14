@@ -1,0 +1,32 @@
+# Python virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Downloaded/cached AI models
+.model_cache/
+
+# User/test photos
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Dataset
+dataset/
+data/
+
+# Environment variables
+.env
+.env.*
+
+# Windows
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
